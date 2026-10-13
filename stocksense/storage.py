@@ -7,6 +7,11 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 
+
+import os
+import streamlit as st
+from huggingface_hub import hf_hub_download
+
 import pandas as pd
 
 from . import config as C
@@ -18,23 +23,73 @@ def _fingerprint(path) -> str:
     return "_".join(f"{f.stem}-{f.stat().st_size}" for f in files)[:150]
 
 
+HF_REPO_ID = "ParthaviW/stocksense-nse-data"
+HF_FILENAME = "nse_2000000.csv"
+
+
+def resolve_data_path(path):
+    """Use the local file when available; otherwise download the private HF dataset."""
+    p = Path(path).expanduser()
+
+    # Preserve the user's ability to select another local file or folder.
+    if p.exists():
+        return p
+
+    # Only auto-download when the default dataset path is requested.
+    if p.resolve() != C.DEFAULT_DATA_PATH.resolve():
+        return p
+
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        try:
+            token = st.secrets.get("HF_TOKEN")
+        except Exception:
+            token = None
+
+    if not token:
+        raise RuntimeError(
+            "HF_TOKEN is missing. Add it under Streamlit Cloud → App settings → Secrets."
+        )
+
+    try:
+        downloaded_path = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename=HF_FILENAME,
+            repo_type="dataset",
+            token=token,
+        )
+        return Path(downloaded_path)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not download the NSE dataset from Hugging Face. "
+            "Check HF_TOKEN and repository access."
+        ) from exc
+
+
+
 def load_with_cache(path, series=("EQ",), cache_dir: Path = C.CACHE_DIR):
-    """Return (clean_df, report, from_cache). Uses a parquet cache keyed on file names + sizes,
-    so the 340 MB CSV is only parsed once."""
+    """Load data, downloading the default private HF dataset when needed."""
+    resolved_path = resolve_data_path(path)
+
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    key = _fingerprint(path) + "_" + "-".join(series)
-    pq, js = cache_dir / f"{key}.parquet", cache_dir / f"{key}.json"
+
+    key = _fingerprint(resolved_path) + "_" + "-".join(series)
+    pq = cache_dir / f"{key}.parquet"
+    js = cache_dir / f"{key}.json"
+
     if pq.exists() and js.exists():
         try:
             rep = QualityReport(**json.loads(js.read_text()))
             return pd.read_parquet(pq), rep, True
         except Exception:
-            pass  # corrupt cache -> rebuild below
-    df, rep = load_and_clean(path, series)
+            pass  # Corrupt cache: rebuild it.
+
+    df, rep = load_and_clean(resolved_path, series)
     df.to_parquet(pq, index=False)
     js.write_text(json.dumps(rep.to_dict(), default=str))
     return df, rep, False
+
 
 
 class ResultStore:
