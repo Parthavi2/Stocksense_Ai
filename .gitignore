@@ -11,3 +11,5 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.log
+
+data/nse_2000000.csv
